@@ -4714,3 +4714,62 @@ class TestDeepseekRuntimePreferences:
         cfg = self._pretrained_config(["DeepseekV3ForCausalLM"], "deepseek_v3")
         _resolve_transceiver_runtime_auto(args, DeepseekV3ForCausalLM, cfg)
         assert args.cache_transceiver_config.transceiver_runtime == "PYTHON"
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("VANILLA", "VANILLA"),
+        ("TRTLLM", "TRTLLM"),
+        ("FLASHINFER", "FLASHINFER"),
+        ("vanilla", "VANILLA"),
+        ("trtllm", "TRTLLM"),
+        ("flashinfer", "FLASHINFER"),
+        ("FlashInfer", "FLASHINFER"),
+    ],
+)
+def test_attn_backend_accepts_supported_values_case_insensitively(
+        name: str, expected: str) -> None:
+    args = TorchLlmArgs(model=llama_model_path, attn_backend=name)
+    assert args.attn_backend == expected
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    "name",
+    [
+        "BOGUS",
+        "",
+        "FLASHINFER_STAR_ATTENTION",
+    ],
+)
+def test_attn_backend_rejects_invalid_values(name: str) -> None:
+    with pytest.raises(ValidationError, match="attn_backend"):
+        TorchLlmArgs(model=llama_model_path, attn_backend=name)
+
+
+@pytest.mark.cpu_only
+def test_attn_backend_error_lists_supported_values() -> None:
+    with pytest.raises(ValidationError,
+                       match=re.escape("Invalid attn_backend='BOGUS'. "
+                                       "Supported values: VANILLA, TRTLLM, "
+                                       "FLASHINFER")):
+        TorchLlmArgs(model=llama_model_path, attn_backend="BOGUS")
+
+
+@pytest.mark.cpu_only
+def test_attn_backend_vocabularies_match() -> None:
+    """Config validation and backend dispatch accept the same names.
+
+    The literals are intentionally duplicated (see
+    `TorchLlmArgs.validate_attn_backend`); this test fails if either side
+    drifts.
+    """
+    from tensorrt_llm._torch.attention.backends.utils import \
+        SUPPORTED_ATTENTION_BACKENDS
+    assert tuple(SUPPORTED_ATTENTION_BACKENDS) == ("VANILLA", "TRTLLM",
+                                                   "FLASHINFER")
+    for name in SUPPORTED_ATTENTION_BACKENDS:
+        args = TorchLlmArgs(model=llama_model_path, attn_backend=name)
+        assert args.attn_backend == name

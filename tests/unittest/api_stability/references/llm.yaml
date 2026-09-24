@@ -176,7 +176,7 @@ methods:
         status: beta
         default: null
       attn_backend:
-        annotation: str
+        annotation: Literal['VANILLA', 'TRTLLM', 'FLASHINFER']
         default: TRTLLM
         status: beta
       enable_mla_skip_correction:
