@@ -742,7 +742,8 @@ class Attention(nn.Module):
 
         if self.rope_fusion and not attn_cls.support_fused_rope():
             logger.warning_once(
-                "rope_fusion is true but the attention backend does not support it. Will disable rope_fusion.",
+                f"rope_fusion is true but the attention backend ({self.attn_backend}) "
+                "does not support it. Will disable rope_fusion.",
                 key="disable_rope_fusion_for_non_supported_backend")
             self.rope_fusion = False
         # If rope_fusion is not specified, enable if the attention backend supports it.
@@ -780,6 +781,9 @@ class Attention(nn.Module):
             q_scaling=self.q_scaling,
             attention_chunk_size=self.attention_chunk_size,
             sparse_params=sparse_params,
+            # Reuse the class resolved above so the capability queries and the
+            # construction share one backend resolution.
+            attn_cls=attn_cls,
         )
 
         self.support_fused_qkv = self.attn.support_fused_qkv()
@@ -1060,11 +1064,19 @@ class Attention(nn.Module):
                 mrope_position_deltas = mrope_config["mrope_position_deltas"]
 
         # Currently only TRTLLM and FLASHINFER support the custom inplace op.
+        backend_supports_custom_inplace_op = (self.attn_backend
+                                              in ("TRTLLM", "FLASHINFER"))
         use_custom_inplace_op = (
-            self.register_to_config and
-            (self.attn_backend == "TRTLLM" or self.attn_backend == "FLASHINFER")
+            self.register_to_config and backend_supports_custom_inplace_op
             and (is_torch_compiling() or is_in_breakable_cuda_graph())
             and not self.is_marlin_enabled)
+        if (self.register_to_config and not backend_supports_custom_inplace_op
+                and (is_torch_compiling() or is_in_breakable_cuda_graph())
+                and not self.is_marlin_enabled):
+            logger.warning_once(
+                f"Custom inplace op requires attn_backend='TRTLLM' or 'FLASHINFER'; "
+                f"got {self.attn_backend!r}. Using the standard output path instead.",
+                key="custom_inplace_op_unsupported_backend")
 
         if use_custom_inplace_op:
             outputs = create_attn_outputs(q, attention_mask, self.layer_idx_str)
@@ -1177,7 +1189,9 @@ class Attention(nn.Module):
                 f"Attention sinks are only supported with attn_backend='TRTLLM'. "
                 f"Current backend: {self.attn_backend}.")
         if relative_attention_bias is not None:
-            assert self.attn_backend == "TRTLLM", "Relative attention bias is only supported for TRTLLM backend."
+            assert self.attn_backend == "TRTLLM", (
+                f"Relative attention bias is only supported for TRTLLM backend. "
+                f"Current backend: {self.attn_backend}.")
 
         attn_output = self.forward_impl(
             q,

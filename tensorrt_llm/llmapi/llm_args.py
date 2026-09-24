@@ -5758,13 +5758,34 @@ class TorchLlmArgs(BaseLlmArgs):
         # that require them.
         return self
 
-    attn_backend: str = Field(
-        default='TRTLLM',
-        description="Attention backend to use.",
-        status="beta",
-        # Recognized values mirror get_attention_backend dispatch in
-        # tensorrt_llm/_torch/attention/backends/utils.py.
-        telemetry=TelemetryField.categorical("VANILLA", "TRTLLM", "FLASHINFER"))
+    attn_backend: Literal["VANILLA", "TRTLLM",
+                          "FLASHINFER"] = Field(
+                              default='TRTLLM',
+                              description="Attention backend to use.",
+                              status="beta",
+                              # Recognized values mirror
+                              # SUPPORTED_ATTENTION_BACKENDS in
+                              # tensorrt_llm/_torch/attention/backends/utils.py.
+                              telemetry=TelemetryField.categorical(
+                                  "VANILLA", "TRTLLM", "FLASHINFER"))
+
+    @field_validator("attn_backend", mode="before")
+    @classmethod
+    def validate_attn_backend(cls, attn_backend):
+        # Accept backend names case-insensitively (e.g. "flashinfer") and
+        # normalize to the canonical uppercase form so downstream exact-match
+        # consumers see one spelling. The literals mirror
+        # SUPPORTED_ATTENTION_BACKENDS; importing that tuple here would widen
+        # this module's import graph, so
+        # test_attn_backend_vocabularies_match guards against drift instead.
+        if isinstance(attn_backend, str):
+            normalized = attn_backend.upper()
+            if normalized not in ("VANILLA", "TRTLLM", "FLASHINFER"):
+                raise ValueError(
+                    f"Invalid attn_backend={attn_backend!r}. "
+                    f"Supported values: VANILLA, TRTLLM, FLASHINFER.")
+            return normalized
+        return attn_backend
 
     enable_mla_skip_correction: bool = Field(
         default=False,

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, List, Optional, Sequence, Type
+from typing import Dict, List, Optional, Sequence, Tuple, Type
 
 import numpy as np
 import torch
@@ -30,6 +30,46 @@ from .sparse.params import SparseParams
 from .vanilla import VanillaAttention
 
 
+#: Canonical attention backend names accepted by `get_attention_backend`
+#: (uppercase; matching is case-insensitive). `TorchLlmArgs.attn_backend`
+#: validation mirrors this tuple; `test_attn_backend_vocabularies_match`
+#: guards against drift between the two.
+SUPPORTED_ATTENTION_BACKENDS = ("VANILLA", "TRTLLM", "FLASHINFER")
+
+#: Backend selected when the requested backend cannot be used.
+_FALLBACK_ATTENTION_BACKEND = "TRTLLM"
+
+
+def _explain_attention_backend_selection(
+    backend_name: str,
+    *,
+    flashinfer_available: Optional[bool] = None,
+) -> Tuple[str, Optional[str]]:
+    """Decide the backend-class selection for `backend_name`.
+
+    Returns the canonical backend name to use and, when that differs from
+    the request, the reason for the fallback (`None` otherwise). Pure
+    classification: no logging and no class lookup, so selection decisions
+    are unit-testable without CUDA.
+
+    `flashinfer_available` defaults to the process-wide availability flag
+    and exists so tests can exercise both branches deterministically.
+    """
+    normalized = backend_name.upper()
+    if normalized == "FLASHINFER":
+        if flashinfer_available is None:
+            flashinfer_available = IS_FLASHINFER_AVAILABLE
+        if not flashinfer_available:
+            return (_FALLBACK_ATTENTION_BACKEND,
+                    "requires the FlashInfer package, which is not installed")
+        return normalized, None
+    if normalized not in SUPPORTED_ATTENTION_BACKENDS:
+        return (_FALLBACK_ATTENTION_BACKEND,
+                f"is not a supported attention backend "
+                f"(supported: {', '.join(SUPPORTED_ATTENTION_BACKENDS)})")
+    return normalized, None
+
+
 def get_attention_backend(
     backend_name: str,
     sparse_params: Optional[SparseParams] = None,
@@ -38,23 +78,37 @@ def get_attention_backend(
     # does not pull in .trtllm at load time: .trtllm imports helpers from here,
     # and a module-level import here would create a circular import.
     from .trtllm import TrtllmAttention
-    backend_name = backend_name.upper()
-    if backend_name == "VANILLA":
+    canonical_name, fallback_reason = _explain_attention_backend_selection(
+        backend_name)
+    if fallback_reason is not None:
+        if backend_name.upper() == "FLASHINFER":
+            key = "attention_backend_fallback_flashinfer_unavailable"
+        else:
+            key = "attention_backend_fallback_unknown_backend"
+        logger.warning_once(
+            f"Requested attention backend {backend_name!r} {fallback_reason}; "
+            f"using {canonical_name} instead.",
+            key=key)
+        # Fall back to dense TRTLLM attention without sparse redispatch,
+        # preserving the long-standing fallback semantics pinned by
+        # test_sparse_attention_backend_fallback_does_not_redispatch.
+        return TrtllmAttention
+    if canonical_name == "VANILLA":
         if sparse_params is not None:
             return get_vanilla_sparse_attn_attention_backend(sparse_params)
         return VanillaAttention
-    elif backend_name == "TRTLLM":
+    elif canonical_name == "TRTLLM":
         if sparse_params is not None:
             return get_trtllm_sparse_attn_attention_backend(sparse_params)
         return TrtllmAttention
-    elif backend_name == "FLASHINFER" and IS_FLASHINFER_AVAILABLE:
+    elif canonical_name == "FLASHINFER":
         from .flashinfer import FlashInferAttention
         if sparse_params is not None:
             return get_flashinfer_sparse_attn_attention_backend(sparse_params)
         return FlashInferAttention
-
-    logger.warning("Falling back to TRTLLM attention backend")
-    return TrtllmAttention
+    raise AssertionError(
+        f"Unreachable: {canonical_name!r} is not a supported attention backend."
+    )
 
 
 def create_attention(
@@ -82,11 +136,22 @@ def create_attention(
     aux_stream: Optional[torch.cuda.Stream] = None,
     kv_cache_dtype: str = "auto",
     skip_correction_threshold: float = 0.0,
+    attn_cls: Optional[Type[AttentionBackend]] = None,
 ) -> AttentionBackend:
+    """Create the attention backend instance for one layer.
+
+    `attn_cls`, when provided, must be the class `get_attention_backend`
+    returns for (`backend_name`, `sparse_params`); it lets a caller that
+    already resolved the class for capability queries reuse the exact same
+    class for construction instead of resolving twice. When omitted, the
+    backend is resolved here as before.
+    """
     if attention_chunk_size is not None and backend_name.upper() != "TRTLLM":
         raise ValueError(
             f"Backend {backend_name} does not support chunked attention.")
-    attn_cls = get_attention_backend(backend_name, sparse_params=sparse_params)
+    if attn_cls is None:
+        attn_cls = get_attention_backend(backend_name,
+                                         sparse_params=sparse_params)
 
     if is_mla_enable:
         assert attn_cls.support_mla(

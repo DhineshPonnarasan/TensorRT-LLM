@@ -30,6 +30,10 @@ The TRT-LLM backend, `TrtllmAttention`, serves as the default backend and suppor
 1. **Fused QKV Input**: It can accept a single QKV tensor as input, which is more efficient compared to using separate Q, K, and V tensors.
 2. **FP8 Output**: It supports outputting the attention result in FP8 format, fusing quantization into the attention computation process.
 
+## Backend Selection
+
+`attn_backend` accepts the values `VANILLA`, `TRTLLM`, and `FLASHINFER`, case-insensitively (`"flashinfer"` is normalized to `"FLASHINFER"`); any other value is rejected during configuration with an error listing the supported values. When `FLASHINFER` is requested but the FlashInfer package is not installed, the TRT-LLM backend is used instead and a warning is logged naming the requested backend, the reason, and the selected fallback. If a sparse configuration is present, the fallback still selects dense TRTLLM attention without sparse redispatch.
+
 ## Implement a New Attention Backend
 
 You can implement a new attention backend to integrate other attention libraries.
